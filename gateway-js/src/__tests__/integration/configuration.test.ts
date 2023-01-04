@@ -1,15 +1,12 @@
 import gql from 'graphql-tag';
 import http from 'http';
-import mockedEnv from 'mocked-env';
-import { Logger } from 'apollo-server-types';
+import type { Logger } from '@apollo/utils.logger';
 import { ApolloGateway } from '../..';
 import {
   mockSdlQuerySuccess,
   mockSupergraphSdlRequestSuccess,
   mockApolloConfig,
   mockCloudConfigUrl1,
-  mockCloudConfigUrl2,
-  mockCloudConfigUrl3,
 } from './nockMocks';
 import { getTestingSupergraphSdl } from '../execution-utils';
 import { fixtures, Fixture } from 'apollo-federation-integration-testsuite';
@@ -205,8 +202,8 @@ describe('gateway startup errors', () => {
 
     const expected =
       "A valid schema couldn't be composed. The following composition errors were found:\n"
-    + '	[accounts] On type "User", for @key(fields: "id"): Cannot query field "id" on type "User" (the field should be either be added to this subgraph or, if it should not be resolved by this subgraph, you need to add it to this subgraph with @external).\n'
-    + '	[accounts] On type "Account", for @key(fields: "id"): Cannot query field "id" on type "Account" (the field should be either be added to this subgraph or, if it should not be resolved by this subgraph, you need to add it to this subgraph with @external).'
+    + '	[accounts] On type "User", for @key(fields: "id"): Cannot query field "id" on type "User" (the field should either be added to this subgraph or, if it should not be resolved by this subgraph, you need to add it to this subgraph with @external).\n'
+    + '	[accounts] On type "Account", for @key(fields: "id"): Cannot query field "id" on type "Account" (the field should either be added to this subgraph or, if it should not be resolved by this subgraph, you need to add it to this subgraph with @external).'
     expect(err.message).toBe(expected);
   });
 });
@@ -320,46 +317,6 @@ describe('gateway config / env behavior', () => {
       );
     });
   });
-
-  describe('schema config delivery endpoint configuration', () => {
-    it('A code config overrides the env variable', async () => {
-      cleanUp = mockedEnv({
-        APOLLO_SCHEMA_CONFIG_DELIVERY_ENDPOINT: 'env-config',
-      });
-
-      const config = {
-        logger,
-        uplinkEndpoints: [mockCloudConfigUrl1, mockCloudConfigUrl2, mockCloudConfigUrl3],
-      };
-      gateway = new ApolloGateway(config);
-
-      expect(gateway['getUplinkEndpoints'](config)).toEqual([
-        mockCloudConfigUrl1,
-        mockCloudConfigUrl2,
-        mockCloudConfigUrl3,
-      ]);
-
-      gateway = null;
-    });
-  });
-
-  describe('deprecated schema config delivery endpoint configuration', () => {
-    it('A code config overrides the env variable', async () => {
-      cleanUp = mockedEnv({
-        APOLLO_SCHEMA_CONFIG_DELIVERY_ENDPOINT: 'env-config',
-      });
-
-      const config = {
-        logger,
-        schemaConfigDeliveryEndpoint: 'code-config',
-      };
-      gateway = new ApolloGateway(config);
-
-      expect(gateway['getUplinkEndpoints'](config)).toEqual(['code-config']);
-
-      gateway = null;
-    });
-  });
 });
 
 describe('deprecation warnings', () => {
@@ -442,17 +399,6 @@ describe('deprecation warnings', () => {
 
     expect(logger.warn).toHaveBeenCalledWith(
       'The `schemaConfigDeliveryEndpoint` option is deprecated and will be removed in a future version of `@apollo/gateway`. Please migrate to the equivalent (array form) `uplinkEndpoints` configuration option.',
-    );
-  });
-
-  it('warns with `experimental_pollInterval` option set', async () => {
-    new ApolloGateway({
-      experimental_pollInterval: 10000,
-      logger,
-    });
-
-    expect(logger.warn).toHaveBeenCalledWith(
-      'The `experimental_pollInterval` option is deprecated and will be removed in a future version of `@apollo/gateway`. Please migrate to the equivalent `pollIntervalInMs` configuration option.',
     );
   });
 });

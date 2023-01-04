@@ -1,5 +1,5 @@
 // TODO(trevor:removeServiceList) the whole file goes away
-import { Logger } from 'apollo-server-types';
+import type { Logger } from '@apollo/utils.logger';
 import { composeServices } from '@apollo/composition';
 import {
   GetDataSourceFunction,
@@ -72,7 +72,7 @@ export class LocalCompose implements SupergraphManager {
 
   private logUpdateFailure(e: any) {
     this.config.logger?.error(
-      'UplinkFetcher failed to update supergraph with the following error: ' +
+      'LocalCompose failed to update supergraph with the following error: ' +
         (e.message ?? e),
     );
   }

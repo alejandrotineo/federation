@@ -16,16 +16,16 @@ import {
   UnionType,
   VariableDefinitions
 } from "./definitions";
-import { ASTNode, GraphQLError, isValidNameError } from "graphql";
-import { isValidValue } from "./values";
-import { isIntrospectionName } from "./introspection";
+import { assertName, ASTNode, GraphQLError, GraphQLErrorOptions } from "graphql";
+import { isValidValue, valueToString } from "./values";
+import { introspectionTypeNames, isIntrospectionName } from "./introspection";
 import { isSubtype, sameType } from "./types";
+import { ERRORS } from "./error";
 
 // Note really meant to be called manually as it is part of `Schema.validate`, but separated for core-organization reasons.
 // This mostly apply the validations that graphQL-js does in `validateSchema` which we don't reuse because it applies to
 // a `GraphQLSchema` (but note that the bulk of the validation is done by `validateSDL` which we _do_ reuse in `Schema.validate`).
 export function validateSchema(schema: Schema): GraphQLError[] {
-  // TODO: There is quite a few more needed additional graphqQL validations.
   return new Validator(schema).validate();
 }
 
@@ -36,7 +36,7 @@ class InputObjectCircularRefsValidator {
   // Position in the field path
   private readonly fieldPathIndexByTypeName = new Map<string, number>();
 
-  constructor(private readonly onError: (error: GraphQLError) => void) {
+  constructor(private readonly onError: (message: string, options: GraphQLErrorOptions) => void) {
   }
 
   detectCycles(type: InputObjectType) {
@@ -58,10 +58,10 @@ class InputObjectCircularRefsValidator {
         } else {
           const cyclePath = this.fieldPath.slice(cycleIndex);
           const pathStr = cyclePath.map((fieldObj) => fieldObj.name).join('.');
-          this.onError(new GraphQLError(
+          this.onError(
             `Cannot reference Input Object "${fieldType.name}" within itself through a series of non-null fields: "${pathStr}".`,
-            sourceASTs(...cyclePath)
-          ));
+            { nodes: sourceASTs(...cyclePath) },
+          );
         }
         this.fieldPath.pop();
       }
@@ -79,7 +79,10 @@ class Validator {
 
   validate(): GraphQLError[] {
     for (const type of this.schema.types()) {
-      this.validateName(type);
+
+      if (!introspectionTypeNames.includes(type.name)) {
+        this.validateName(type);
+      }
       switch (type.kind) {
         case 'ObjectType':
         case 'InterfaceType':
@@ -113,7 +116,7 @@ class Validator {
     // we found any type missing (in which case, there will be some errors and users should fix those
     // first).
     if (!this.hasMissingTypes) {
-      const refsValidator = new InputObjectCircularRefsValidator(e => this.errors.push(e));
+      const refsValidator = new InputObjectCircularRefsValidator((msg, opts) => this.addError(msg, opts));
       for (const type of this.schema.types()) {
         switch (type.kind) {
           case 'ObjectType':
@@ -130,28 +133,38 @@ class Validator {
     return this.errors;
   }
 
-  private validateHasType(elt: { type?: Type, coordinate: string, sourceAST?: ASTNode }) {
+  private addError(message: string, options: GraphQLErrorOptions) {
+    this.errors.push(ERRORS.INVALID_GRAPHQL.err(message, options));
+  }
+
+  private validateHasType(elt: { type?: Type, coordinate: string, sourceAST?: ASTNode }): boolean {
     // Note that this error can't happen if you parse the schema since it wouldn't be valid syntax, but it can happen for
     // programmatically constructed schema.
     if (!elt.type) {
-      this.errors.push(new GraphQLError(`Element ${elt.coordinate} does not have a type set`, elt.sourceAST));
+      this.addError(`Element ${elt.coordinate} does not have a type set`, { nodes: elt.sourceAST });
       this.hasMissingTypes = false;
     }
+    return !!elt.type;
   }
 
   private validateName(elt: { name: string, sourceAST?: ASTNode}) {
     if (isIntrospectionName(elt.name)) {
+      this.addError(
+        `Name "${elt.name}" must not begin with "__", which is reserved by GraphQL introspection.`,
+        elt.sourceAST ? { nodes: elt.sourceAST } : {}
+      );
       return;
     }
-    const error = isValidNameError(elt.name);
-    if (error) {
-      this.errors.push(elt.sourceAST ? new GraphQLError(error.message, elt.sourceAST) : error);
+    try {
+      assertName(elt.name);
+    } catch (e) {
+      this.addError(e.message, elt.sourceAST ? { nodes: elt.sourceAST } : {});
     }
   }
 
   private validateObjectOrInterfaceType(type: ObjectType | InterfaceType) {
-    if (!type.hasFields(true)) {
-      this.errors.push(new GraphQLError(`Type ${type.name} must define one or more fields.`, type.sourceAST));
+    if (!type.hasFields()) {
+      this.addError(`Type ${type.name} must define one or more fields.`, { nodes: type.sourceAST });
     }
     for (const field of type.fields()) {
       this.validateName(field);
@@ -164,50 +177,47 @@ class Validator {
 
   private validateImplementedInterfaces(type: ObjectType | InterfaceType) {
     if (type.implementsInterface(type.name)) {
-      this.errors.push(new GraphQLError(
+      this.addError(
         `Type ${type} cannot implement itself because it would create a circular reference.`,
-        sourceASTs(type, type.interfaceImplementation(type.name)!)
-      ));
+        { nodes: sourceASTs(type, type.interfaceImplementation(type.name)!) },
+      );
     }
 
     for (const itf of type.interfaces()) {
       for (const itfField of itf.fields()) {
         const field = type.field(itfField.name);
         if (!field) {
-          this.errors.push(new GraphQLError(
+          this.addError(
             `Interface field ${itfField.coordinate} expected but ${type} does not provide it.`,
-            sourceASTs(itfField, type)
-          ));
+            { nodes: sourceASTs(itfField, type) },
+          );
           continue;
         }
         // Note that we may not have validated the interface yet, so making sure we have a meaningful error
         // if the type is not set, even if that means a bit of cpu wasted since we'll re-check later (and
         // as many type as the interface is implemented); it's a cheap check anyway.
-        this.validateHasType(itfField);
-        if (!isSubtype(itfField.type!, field.type!)) {
-          this.errors.push(new GraphQLError(
+        if (this.validateHasType(itfField) && !isSubtype(itfField.type!, field.type!)) {
+          this.addError(
             `Interface field ${itfField.coordinate} expects type ${itfField.type} but ${field.coordinate} of type ${field.type} is not a proper subtype.`,
-            sourceASTs(itfField, field)
-          ));
+            { nodes: sourceASTs(itfField, field) },
+          );
         }
 
         for (const itfArg of itfField.arguments()) {
           const arg = field.argument(itfArg.name);
           if (!arg) {
-            this.errors.push(new GraphQLError(
+            this.addError(
               `Interface field argument ${itfArg.coordinate} expected but ${field.coordinate} does not provide it.`,
-              sourceASTs(itfArg, field)
-            ));
+              { nodes: sourceASTs(itfArg, field) },
+            );
             continue;
           }
-          // Same as above for the field
-          this.validateHasType(itfArg);
           // Note that we could use contra-variance but as graphQL-js currently doesn't allow it, we mimic that.
-          if (!sameType(itfArg.type!, arg.type!)) {
-            this.errors.push(new GraphQLError(
+          if (this.validateHasType(itfArg) && !sameType(itfArg.type!, arg.type!)) {
+            this.addError(
               `Interface field argument ${itfArg.coordinate} expects type ${itfArg.type} but ${arg.coordinate} is type ${arg.type}.`,
-              sourceASTs(itfArg, arg)
-            ));
+              { nodes: sourceASTs(itfArg, arg) },
+            );
           }
         }
 
@@ -217,10 +227,10 @@ class Validator {
             continue;
           }
           if (arg.isRequired()) {
-            this.errors.push(new GraphQLError(
+            this.addError(
               `Field ${field.coordinate} includes required argument ${arg.name} that is missing from the Interface field ${itfField.coordinate}.`,
-              sourceASTs(arg, itfField)
-            ));
+              { nodes: sourceASTs(arg, itfField) },
+            );
           }
         }
       }
@@ -229,12 +239,15 @@ class Validator {
       for (const itfOfItf of itf.interfaces()) {
         if (!type.implementsInterface(itfOfItf)) {
           if (itfOfItf === type) {
-            this.errors.push(new GraphQLError(`Type ${type} cannot implement ${itf} because it would create a circular reference.`, sourceASTs(type, itf)));
+            this.addError(
+              `Type ${type} cannot implement ${itf} because it would create a circular reference.`,
+              { nodes: sourceASTs(type, itf) },
+            );
           } else {
-            this.errors.push(new GraphQLError(
+            this.addError(
               `Type ${type} must implement ${itfOfItf} because it is implemented by ${itf}.`,
-              sourceASTs(type, itf, itfOfItf)
-            ));
+              { nodes: sourceASTs(type, itf, itfOfItf) },
+            );
           }
         }
       }
@@ -243,48 +256,64 @@ class Validator {
 
   private validateInputObjectType(type: InputObjectType) {
     if (!type.hasFields()) {
-      this.errors.push(new GraphQLError(`Input Object type ${type.name} must define one or more fields.`, type.sourceAST));
+      this.addError(`Input Object type ${type.name} must define one or more fields.`, { nodes: type.sourceAST });
     }
     for (const field of type.fields()) {
       this.validateName(field);
-      this.validateHasType(field);
+      if (!this.validateHasType(field)) {
+        continue;
+      }
       if (field.isRequired() && field.isDeprecated()) {
-        this.errors.push(new GraphQLError(
+        this.addError(
           `Required input field ${field.coordinate} cannot be deprecated.`,
-          sourceASTs(field.appliedDirectivesOf('deprecated')[0], field)
-        ));
+          { nodes: sourceASTs(field.appliedDirectivesOf('deprecated')[0], field) },
+        );
+      }
+      if (field.defaultValue !== undefined && !isValidValue(field.defaultValue, field, new VariableDefinitions())) {
+        this.addError(
+          `Invalid default value (got: ${valueToString(field.defaultValue)}) provided for input field ${field.coordinate} of type ${field.type}.`,
+          { nodes: sourceASTs(field) },
+        );
       }
     }
   }
 
   private validateArg(arg: ArgumentDefinition<any>) {
     this.validateName(arg);
-    this.validateHasType(arg);
+    if (!this.validateHasType(arg)) {
+      return;
+    }
     if (arg.isRequired() && arg.isDeprecated()) {
-      this.errors.push(new GraphQLError(
+      this.addError(
         `Required argument ${arg.coordinate} cannot be deprecated.`,
-        sourceASTs(arg.appliedDirectivesOf('deprecated')[0], arg)
-      ));
+        { nodes: sourceASTs(arg.appliedDirectivesOf('deprecated')[0], arg) },
+      );
+    }
+    if (arg.defaultValue !== undefined && !isValidValue(arg.defaultValue, arg, new VariableDefinitions())) {
+      this.addError(
+        `Invalid default value (got: ${valueToString(arg.defaultValue)}) provided for argument ${arg.coordinate} of type ${arg.type}.`,
+        { nodes: sourceASTs(arg) },
+      );
     }
   }
 
   private validateUnionType(type: UnionType) {
     if (type.membersCount() === 0) {
-      this.errors.push(new GraphQLError(`Union type ${type.coordinate} must define one or more member types.`, type.sourceAST));
+      this.addError(`Union type ${type.coordinate} must define one or more member types.`, { nodes: type.sourceAST });
     }
   }
 
   private validateEnumType(type: EnumType) {
     if (type.values.length === 0) {
-      this.errors.push(new GraphQLError(`Enum type ${type.coordinate} must define one or more values.`, type.sourceAST));
+      this.addError(`Enum type ${type.coordinate} must define one or more values.`, { nodes: type.sourceAST });
     }
     for (const value of type.values) {
       this.validateName(value);
       if (value.name === 'true' || value.name === 'false' || value.name === 'null') {
-        this.errors.push(new GraphQLError(
+        this.addError(
           `Enum type ${type.coordinate} cannot include value: ${value}.`,
-          value.sourceAST
-        ));
+          { nodes: value.sourceAST },
+        );
       }
     }
   }
@@ -299,16 +328,19 @@ class Validator {
         // Again, that implies that value is not required.
         continue;
       }
-      if (!isValidValue(value, argument, this.emptyVariables)) {
+      // Note that we validate if the definition argument has a type set separatly
+      // and log an error if necesary, but we just want to avoid calling
+      // `isValidValue` if there is not type as it may throw.
+      if (argument.type && !isValidValue(value, argument, this.emptyVariables)) {
         const parent = application.parent;
         // The only non-named SchemaElement is the `schema` definition.
         const parentDesc = parent instanceof NamedSchemaElement
           ? parent.coordinate
           : 'schema';
-        this.errors.push(new GraphQLError(
+        this.addError(
           `Invalid value for "${argument.coordinate}" of type "${argument.type}" in application of "${definition.coordinate}" to "${parentDesc}".`,
-          sourceASTs(application, argument)
-        ));
+          { nodes: sourceASTs(application, argument) },
+        );
       }
     }
   }

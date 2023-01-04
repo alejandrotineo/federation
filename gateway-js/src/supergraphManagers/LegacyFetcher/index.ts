@@ -4,7 +4,7 @@
  * configuration options of the gateway and will be removed in a future release
  * along with those options.
  */
-import { Logger } from 'apollo-server-types';
+import type { Logger } from '@apollo/utils.logger';
 import resolvable from '@josephg/resolvable';
 import {
   SupergraphManager,
@@ -219,7 +219,7 @@ export class LegacyFetcher implements SupergraphManager {
 
   private logUpdateFailure(e: any) {
     this.config.logger?.error(
-      'UplinkFetcher failed to update supergraph with the following error: ' +
+      'LegacyFetcher failed to update supergraph with the following error: ' +
         (e.message ?? e),
     );
   }

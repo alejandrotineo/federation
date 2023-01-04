@@ -1,14 +1,16 @@
-# `Apollo Subgraph Utilities`
+# `Apollo Subgraph`
 
-This package provides utilities for creating GraphQL microservices, which can be combined into a single endpoint through tools like [Apollo Gateway](https://github.com/apollographql/apollo-server/tree/main/packages/apollo-gateway).
+This package provides utilities for creating GraphQL microservices, which can be combined into a single endpoint through tools like [Apollo Gateway](https://github.com/apollographql/federation/tree/main/gateway-js).
 
-For complete documentation, see the [Apollo Subgraph API reference](https://www.apollographql.com/docs/apollo-server/api/apollo-subgraph/).
+For complete documentation, see the [Apollo Subgraph API reference](https://www.apollographql.com/docs/federation/subgraphs/).
 
 ## Usage
 
 ```js
-const { ApolloServer, gql } = require("apollo-server");
-const { buildSubgraphSchema } = require("@apollo/subgraph");
+import { ApolloServer } from '@apollo/server';
+import { startStandaloneServer } from '@apollo/server/standalone';
+import { gql } from 'graphql-tag';
+import { buildSubgraphSchema } from '@apollo/subgraph';
 
 const typeDefs = gql`
   type Query {
@@ -37,4 +39,8 @@ const resolvers = {
 const server = new ApolloServer({
   schema: buildSubgraphSchema([{ typeDefs, resolvers }])
 });
+
+// Note the top-level await!
+const { url } = await startStandaloneServer(server);
+console.log(`🚀  Server ready at ${url}`);
 ```

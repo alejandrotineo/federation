@@ -1,15 +1,14 @@
 import { GraphQLError, GraphQLSchema } from 'graphql';
-import { HeadersInit } from 'node-fetch';
-import { fetch } from 'apollo-server-env';
-import {
-  GraphQLRequestContextExecutionDidStart,
-  Logger,
-} from 'apollo-server-types';
+import type { HeadersInit } from 'node-fetch';
+import { GatewayGraphQLRequestContext } from '@apollo/server-gateway-interface';
+import type { Logger } from '@apollo/utils.logger';
 import { GraphQLDataSource } from './datasources/types';
-import { QueryPlan } from '@apollo/query-planner';
+import { QueryPlan, QueryPlannerConfig } from '@apollo/query-planner';
 import { OperationContext } from './operationContext';
 import { ServiceMap } from './executeQueryPlan';
 import { ServiceDefinition } from "@apollo/federation-internals";
+import { Fetcher } from '@apollo/utils.fetcher';
+import { UplinkSupergraphManager } from './supergraphManagers';
 
 export type ServiceEndpointDefinition = Pick<ServiceDefinition, 'name' | 'url'>;
 
@@ -22,9 +21,7 @@ export type Experimental_DidResolveQueryPlanCallback = ({
   readonly queryPlan: QueryPlan;
   readonly serviceMap: ServiceMap;
   readonly operationContext: OperationContext;
-  readonly requestContext: GraphQLRequestContextExecutionDidStart<
-    Record<string, any>
-  >;
+  readonly requestContext: GatewayGraphQLRequestContext;
 }) => void;
 
 interface ImplementingServiceLocation {
@@ -81,6 +78,7 @@ export interface ServiceDefinitionUpdate {
 export interface SupergraphSdlUpdate {
   id: string;
   supergraphSdl: string;
+  minDelaySeconds?: number;
 }
 
 export function isSupergraphSdlUpdate(
@@ -125,15 +123,12 @@ interface GatewayConfigBase {
   // experimental observability callbacks
   experimental_didResolveQueryPlan?: Experimental_DidResolveQueryPlanCallback;
   experimental_didUpdateSupergraph?: Experimental_DidUpdateSupergraphCallback;
-  /**
-   * @deprecated use `pollIntervalInMs` instead
-   */
-  experimental_pollInterval?: number;
-  pollIntervalInMs?: number;
   experimental_approximateQueryPlanStoreMiB?: number;
   experimental_autoFragmentization?: boolean;
-  fetcher?: typeof fetch;
+  fetcher?: Fetcher;
   serviceHealthCheck?: boolean;
+
+  queryPlannerConfig?: QueryPlannerConfig;
 }
 
 // TODO(trevor:removeServiceList)
@@ -150,6 +145,7 @@ export interface ServiceListGatewayConfig extends GatewayConfigBase {
     | ((
         service: ServiceEndpointDefinition,
       ) => Promise<HeadersInit> | HeadersInit);
+  pollIntervalInMs?: number;
 }
 
 export interface ManagedGatewayConfig extends GatewayConfigBase {
@@ -168,6 +164,11 @@ export interface ManagedGatewayConfig extends GatewayConfigBase {
    */
   uplinkEndpoints?: string[];
   uplinkMaxRetries?: number;
+  /**
+   * @deprecated use `fallbackPollIntervalInMs` instead
+   */
+  pollIntervalInMs?: number;
+  fallbackPollIntervalInMs?: number;
 }
 
 // TODO(trevor:removeServiceList): migrate users to `supergraphSdl` function option
@@ -176,6 +177,7 @@ interface ManuallyManagedServiceDefsGatewayConfig extends GatewayConfigBase {
    * @deprecated: use `supergraphSdl` instead (either as a `SupergraphSdlHook` or `SupergraphManager`)
    */
   experimental_updateServiceDefinitions: Experimental_UpdateServiceDefinitions;
+  pollIntervalInMs?: number;
 }
 
 // TODO(trevor:removeServiceList): migrate users to `supergraphSdl` function option
@@ -185,6 +187,7 @@ interface ExperimentalManuallyManagedSupergraphSdlGatewayConfig
    * @deprecated: use `supergraphSdl` instead (either as a `SupergraphSdlHook` or `SupergraphManager`)
    */
   experimental_updateSupergraphSdl: Experimental_UpdateSupergraphSdl;
+  pollIntervalInMs?: number;
 }
 
 export function isManuallyManagedSupergraphSdlGatewayConfig(
@@ -238,7 +241,7 @@ type ManuallyManagedGatewayConfig =
   | ManuallyManagedServiceDefsGatewayConfig
   | ExperimentalManuallyManagedSupergraphSdlGatewayConfig
   | ManuallyManagedSupergraphSdlGatewayConfig
-  // TODO(trevor:removeServiceList
+  // TODO(trevor:removeServiceList)
   | ServiceListGatewayConfig;
 
 // TODO(trevor:removeServiceList)
@@ -322,6 +325,8 @@ export function isManagedConfig(
   return (
     'schemaConfigDeliveryEndpoint' in config ||
     'uplinkEndpoints' in config ||
+    'fallbackPollIntervalInMs' in config ||
+    (isSupergraphManagerConfig(config) && config.supergraphSdl instanceof UplinkSupergraphManager) ||
     (!isLocalConfig(config) &&
       !isStaticSupergraphSdlConfig(config) &&
       !isManuallyManagedConfig(config))

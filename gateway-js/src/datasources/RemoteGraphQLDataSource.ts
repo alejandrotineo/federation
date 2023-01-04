@@ -1,28 +1,18 @@
-import {
-  GraphQLRequestContext,
-  GraphQLResponse,
-  ValueOrPromise,
-  GraphQLRequest,
-  CacheHint,
-  CacheScope,
-  CachePolicy,
-} from 'apollo-server-types';
-import {
-  ApolloError,
-  AuthenticationError,
-  ForbiddenError,
-} from 'apollo-server-errors';
-import { fetch, Request, Headers, Response } from 'apollo-server-env';
 import { isObject } from '../utilities/predicates';
 import { GraphQLDataSource, GraphQLDataSourceProcessOptions, GraphQLDataSourceRequestKind } from './types';
-import createSHA from 'apollo-server-core/dist/utils/createSHA';
+import { createHash } from '@apollo/utils.createhash';
 import { parseCacheControlHeader } from './parseCacheControlHeader';
 import fetcher from 'make-fetch-happen';
+import { Headers as NodeFetchHeaders, Request as NodeFetchRequest } from 'node-fetch';
+import { Fetcher, FetcherRequestInit, FetcherResponse } from '@apollo/utils.fetcher';
+import { GraphQLError, GraphQLErrorExtensions } from 'graphql';
+import { GatewayCacheHint, GatewayCachePolicy, GatewayGraphQLRequest, GatewayGraphQLRequestContext, GatewayGraphQLResponse } from '@apollo/server-gateway-interface';
+
 export class RemoteGraphQLDataSource<
   TContext extends Record<string, any> = Record<string, any>,
 > implements GraphQLDataSource<TContext>
 {
-  fetcher: typeof fetch;
+  fetcher: Fetcher;
 
   constructor(
     config?: Partial<RemoteGraphQLDataSource<TContext>> &
@@ -30,6 +20,11 @@ export class RemoteGraphQLDataSource<
       ThisType<RemoteGraphQLDataSource<TContext>>,
   ) {
     this.fetcher = fetcher.defaults({
+      // Allow an arbitrary number of sockets per subgraph. This is the default
+      // behavior of Node's http.Agent as well as the npm package agentkeepalive
+      // which wraps it, but is not the default behavior of make-fetch-happen
+      // which wraps agentkeepalive (that package sets this to 15 by default).
+      maxSockets: Infinity,
       // although this is the default, we want to take extra care and be very
       // explicity to ensure that mutations cannot be retried. please leave this
       // intact.
@@ -70,7 +65,7 @@ export class RemoteGraphQLDataSource<
 
   async process(
     options: GraphQLDataSourceProcessOptions<TContext>,
-  ): Promise<GraphQLResponse> {
+  ): Promise<GatewayGraphQLResponse> {
     const { request, context: originalContext } = options;
     // Deal with a bit of a hairy situation in typings: when doing health checks
     // and schema checks we always pass in `{}` as the context even though it's
@@ -82,7 +77,12 @@ export class RemoteGraphQLDataSource<
     const context = originalContext as TContext;
 
     // Respect incoming http headers (eg, apollo-federation-include-trace).
-    const headers = (request.http && request.http.headers) || new Headers();
+    const headers = new NodeFetchHeaders();
+    if (request.http?.headers) {
+      for (const [name, value] of request.http.headers) {
+        headers.append(name, value);
+      }
+    }
     headers.set('Content-Type', 'application/json');
 
     request.http = {
@@ -107,12 +107,13 @@ export class RemoteGraphQLDataSource<
     const overallCachePolicy =
       this.honorSubgraphCacheControlHeader &&
       options.kind === GraphQLDataSourceRequestKind.INCOMING_OPERATION &&
-      options.incomingRequestContext.overallCachePolicy?.restrict
+      options.incomingRequestContext.overallCachePolicy &&
+      'restrict' in options.incomingRequestContext.overallCachePolicy
         ? options.incomingRequestContext.overallCachePolicy
         : null;
 
     if (this.apq) {
-      const apqHash = createSHA('sha256').update(request.query).digest('hex');
+      const apqHash = createHash('sha256').update(request.query).digest('hex');
 
       // Take the original extensions and extend them with
       // the necessary "extensions" for APQ handshaking.
@@ -149,7 +150,7 @@ export class RemoteGraphQLDataSource<
     // If APQ was enabled, we'll run the same request again, but add in the
     // previously omitted `query`.  If APQ was NOT enabled, this is the first
     // request (non-APQ, all the way).
-    const requestWithQuery: GraphQLRequest = {
+    const requestWithQuery: GatewayGraphQLRequest = {
       query,
       ...requestWithoutQuery,
     };
@@ -163,9 +164,9 @@ export class RemoteGraphQLDataSource<
   }
 
   private async sendRequest(
-    request: GraphQLRequest,
+    request: GatewayGraphQLRequest,
     context: TContext,
-  ): Promise<GraphQLResponse> {
+  ): Promise<GatewayGraphQLResponse> {
     // This would represent an internal programming error since this shouldn't
     // be possible in the way that this method is invoked right now.
     if (!request.http) {
@@ -177,20 +178,24 @@ export class RemoteGraphQLDataSource<
     // we're accessing (e.g. url) and what we access it with (e.g. headers).
     const { http, ...requestWithoutHttp } = request;
     const stringifiedRequestWithoutHttp = JSON.stringify(requestWithoutHttp);
-    const fetchRequest = new Request(http.url, {
-      ...http,
+    const requestInit: FetcherRequestInit = {
+      method: http.method,
+      headers: Object.fromEntries(http.headers),
       body: stringifiedRequestWithoutHttp,
-    });
+    };
+    // Note that we don't actually send this Request object to the fetcher; it
+    // is merely sent to methods on this object that might be overridden by users.
+    // We are careful to only send data to the overridable fetcher function that uses
+    // plain JS objects --- some fetch implementations don't know how to handle
+    // Request or Headers objects created by other fetch implementations.
+    const fetchRequest = new NodeFetchRequest(http.url, requestInit);
 
-    let fetchResponse: Response | undefined;
+    let fetchResponse: FetcherResponse | undefined;
 
     try {
       // Use our local `fetcher` to allow for fetch injection
       // Use the fetcher's `Request` implementation for compatibility
-      fetchResponse = await this.fetcher(http.url, {
-        ...http,
-        body: stringifiedRequestWithoutHttp,
-      });
+      fetchResponse = await this.fetcher(http.url, requestInit);
 
       if (!fetchResponse.ok) {
         throw await this.errorFromResponse(fetchResponse);
@@ -214,7 +219,7 @@ export class RemoteGraphQLDataSource<
 
   public willSendRequest?(
     options: GraphQLDataSourceProcessOptions<TContext>,
-  ): ValueOrPromise<void>;
+  ): void | Promise<void>;
 
   private async respond({
     response,
@@ -222,11 +227,11 @@ export class RemoteGraphQLDataSource<
     context,
     overallCachePolicy,
   }: {
-    response: GraphQLResponse;
-    request: GraphQLRequest;
+    response: GatewayGraphQLResponse;
+    request: GatewayGraphQLRequest;
     context: TContext;
-    overallCachePolicy: CachePolicy | null;
-  }): Promise<GraphQLResponse> {
+    overallCachePolicy: GatewayCachePolicy | null;
+  }): Promise<GatewayGraphQLResponse> {
     const processedResponse =
       typeof this.didReceiveResponse === 'function'
         ? await this.didReceiveResponse({ response, request, context })
@@ -241,16 +246,16 @@ export class RemoteGraphQLDataSource<
       // thus the overall response) is uncacheable. (If you don't like this, you
       // can tweak the `cache-control` header in your `didReceiveResponse`
       // method.)
-      const hint: CacheHint = { maxAge: 0 };
+      const hint: GatewayCacheHint = { maxAge: 0 };
       const maxAge = parsed['max-age'];
       if (typeof maxAge === 'string' && maxAge.match(/^[0-9]+$/)) {
         hint.maxAge = +maxAge;
       }
       if (parsed['private'] === true) {
-        hint.scope = CacheScope.Private;
+        hint.scope = 'PRIVATE';
       }
       if (parsed['public'] === true) {
-        hint.scope = CacheScope.Public;
+        hint.scope = 'PUBLIC';
       }
       overallCachePolicy.restrict(hint);
     }
@@ -260,22 +265,22 @@ export class RemoteGraphQLDataSource<
 
   public didReceiveResponse?(
     requestContext: Required<
-      Pick<GraphQLRequestContext<TContext>, 'request' | 'response' | 'context'>
+      Pick<GatewayGraphQLRequestContext<TContext>, 'request' | 'response' | 'context'>
     >,
-  ): ValueOrPromise<GraphQLResponse>;
+  ): GatewayGraphQLResponse | Promise<GatewayGraphQLResponse>;
 
   public didEncounterError(
     error: Error,
-    _fetchRequest: Request,
-    _fetchResponse?: Response,
+    _fetchRequest: NodeFetchRequest,
+    _fetchResponse?: FetcherResponse,
     _context?: TContext,
   ) {
     throw error;
   }
 
   public parseBody(
-    fetchResponse: Response,
-    _fetchRequest?: Request,
+    fetchResponse: FetcherResponse,
+    _fetchRequest?: NodeFetchRequest,
     _context?: TContext,
   ): Promise<object | string> {
     const contentType = fetchResponse.headers.get('Content-Type');
@@ -286,29 +291,26 @@ export class RemoteGraphQLDataSource<
     }
   }
 
-  public async errorFromResponse(response: Response) {
-    const message = `${response.status}: ${response.statusText}`;
-
-    let error: ApolloError;
-    if (response.status === 401) {
-      error = new AuthenticationError(message);
-    } else if (response.status === 403) {
-      error = new ForbiddenError(message);
-    } else {
-      error = new ApolloError(message);
-    }
-
+  public async errorFromResponse(response: FetcherResponse) {
     const body = await this.parseBody(response);
 
-    Object.assign(error.extensions, {
+    const extensions: GraphQLErrorExtensions = {
       response: {
         url: response.url,
         status: response.status,
         statusText: response.statusText,
         body,
       },
-    });
+    };
 
-    return error;
+    if (response.status === 401) {
+      extensions.code = 'UNAUTHENTICATED';
+    } else if (response.status === 403) {
+      extensions.code = 'FORBIDDEN';
+    }
+
+    return new GraphQLError(`${response.status}: ${response.statusText}`, {
+      extensions,
+    });
   }
 }

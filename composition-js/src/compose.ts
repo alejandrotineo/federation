@@ -7,6 +7,7 @@ import {
   ServiceDefinition,
   subgraphsFromServiceList,
   ERRORS,
+  upgradeSubgraphsIfNecessary,
 } from "@apollo/federation-internals";
 import { GraphQLError } from "graphql";
 import { buildFederatedQueryGraph, buildSupergraphAPIQueryGraph } from "@apollo/query-graphs";
@@ -31,7 +32,18 @@ export interface CompositionSuccess {
 }
 
 export function compose(subgraphs: Subgraphs): CompositionResult {
-  const mergeResult = mergeSubgraphs(subgraphs);
+  const upgradeResult = upgradeSubgraphsIfNecessary(subgraphs);
+  if (upgradeResult.errors) {
+    return { errors: upgradeResult.errors };
+  }
+
+  const toMerge = upgradeResult.subgraphs;
+  const validationErrors = toMerge.validate();
+  if (validationErrors) {
+    return { errors: validationErrors };
+  }
+
+  const mergeResult = mergeSubgraphs(toMerge);
   if (mergeResult.errors) {
     return { errors: mergeResult.errors };
   }
@@ -39,9 +51,9 @@ export function compose(subgraphs: Subgraphs): CompositionResult {
   const supergraphSchema = mergeResult.supergraph;
   const supergraphQueryGraph = buildSupergraphAPIQueryGraph(supergraphSchema);
   const federatedQueryGraph = buildFederatedQueryGraph(supergraphSchema, false);
-  const validationResult = validateGraphComposition(supergraphQueryGraph, federatedQueryGraph);
+  const validationResult = validateGraphComposition(supergraphSchema, supergraphQueryGraph, federatedQueryGraph);
   if (validationResult.errors) {
-    return { errors: validationResult.errors.map(e => ERRORS.SATISFIABILITY_ERROR.err({ message: e.message })) };
+    return { errors: validationResult.errors.map(e => ERRORS.SATISFIABILITY_ERROR.err(e.message)) };
   }
 
   // printSchema calls validateOptions, which can throw

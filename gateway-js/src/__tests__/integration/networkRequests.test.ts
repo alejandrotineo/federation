@@ -1,8 +1,8 @@
 import gql from 'graphql-tag';
 import { GraphQLObjectType, GraphQLSchema } from 'graphql';
 import mockedEnv from 'mocked-env';
-import { Logger } from 'apollo-server-types';
-import { ApolloGateway } from '../..';
+import type { Logger } from '@apollo/utils.logger';
+import { ApolloGateway, UplinkSupergraphManager } from '../..';
 import {
   mockSdlQuerySuccess,
   mockServiceHealthCheckSuccess,
@@ -56,8 +56,12 @@ function getRootQueryFields(schema?: GraphQLSchema): string[] {
 let logger: Logger;
 let gateway: ApolloGateway | null = null;
 let cleanUp: (() => void) | null = null;
+let originalMinPollInterval = UplinkSupergraphManager.MIN_POLL_INTERVAL_MS;
 
 beforeEach(() => {
+  // Set the min poll interval artificially low so we're not waiting during tests
+  // @ts-ignore
+  UplinkSupergraphManager['MIN_POLL_INTERVAL_MS'] = 100;
   nockBeforeEach();
 
   const warn = jest.fn();
@@ -74,12 +78,14 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  nockAfterEach();
-
+  // @ts-ignore
+  UplinkSupergraphManager['MIN_POLL_INTERVAL_MS'] = originalMinPollInterval;
   if (gateway) {
     await gateway.stop();
     gateway = null;
   }
+
+  nockAfterEach();
 
   if (cleanUp) {
     cleanUp();
@@ -90,7 +96,7 @@ afterEach(async () => {
 it('Queries remote endpoints for their SDLs', async () => {
   mockSdlQuerySuccess(simpleService);
 
-  gateway = new ApolloGateway({ serviceList: [simpleService] });
+  gateway = new ApolloGateway({ serviceList: [simpleService], logger });
   await gateway.load();
   expect(gateway.schema!.getType('User')!.description).toBe('This is my User');
 });
@@ -139,8 +145,6 @@ it('Updates Supergraph SDL from remote storage', async () => {
     logger,
     uplinkEndpoints: [mockCloudConfigUrl1],
   });
-  // for testing purposes, a short pollInterval is ideal so we'll override here
-  gateway['pollIntervalInMs'] = 100;
 
   const schemas: GraphQLSchema[] = [];
   gateway.onSchemaLoadOrUpdate(({ apiSchema }) => {
@@ -183,13 +187,6 @@ describe('Supergraph SDL update failures', () => {
     ).rejects.toThrowErrorMatchingInlineSnapshot(
       `"An error occurred while fetching your schema from Apollo: 401 Unauthorized"`,
     );
-
-    await expect(gateway.stop()).rejects.toThrowErrorMatchingInlineSnapshot(
-      `"ApolloGateway.stop does not need to be called before ApolloGateway.load is called successfully"`,
-    );
-    // Set to `null` so we don't try to call `stop` on it in the `afterEach`,
-    // which triggers a different error that we're not testing for here.
-    gateway = null;
   });
 
   it('Handles arbitrary fetch failures (non 200 response)', async () => {
@@ -206,14 +203,11 @@ describe('Supergraph SDL update failures', () => {
       uplinkMaxRetries: 0,
     });
 
-    // for testing purposes, a short pollInterval is ideal so we'll override here
-    gateway['pollIntervalInMs'] = 100;
-
     await gateway.load(mockApolloConfig);
     await errorLoggedPromise;
 
     expect(logger.error).toHaveBeenCalledWith(
-      'UplinkFetcher failed to update supergraph with the following error: An error occurred while fetching your schema from Apollo: 500 Internal Server Error',
+      'UplinkSupergraphManager failed to update supergraph with the following error: An error occurred while fetching your schema from Apollo: 500 Internal Server Error',
     );
   });
 
@@ -238,14 +232,12 @@ describe('Supergraph SDL update failures', () => {
       uplinkEndpoints: [mockCloudConfigUrl1],
       uplinkMaxRetries: 0,
     });
-    // for testing purposes, a short pollInterval is ideal so we'll override here
-    gateway['pollIntervalInMs'] = 100;
 
     await gateway.load(mockApolloConfig);
     await errorLoggedPromise;
 
     expect(logger.error).toHaveBeenCalledWith(
-      `UplinkFetcher failed to update supergraph with the following error: An error occurred while fetching your schema from Apollo: \nCannot query field "fail" on type "Query".`,
+      `UplinkSupergraphManager failed to update supergraph with the following error: An error occurred while fetching your schema from Apollo: \nCannot query field "fail" on type "Query".`,
     );
   });
 
@@ -272,14 +264,12 @@ describe('Supergraph SDL update failures', () => {
       logger,
       uplinkEndpoints: [mockCloudConfigUrl1],
     });
-    // for testing purposes, a short pollInterval is ideal so we'll override here
-    gateway['pollIntervalInMs'] = 100;
 
     await gateway.load(mockApolloConfig);
     await errorLoggedPromise;
 
     expect(logger.error).toHaveBeenCalledWith(
-      'UplinkFetcher failed to update supergraph with the following error: Syntax Error: Unexpected Name "Syntax".',
+      'UplinkSupergraphManager failed to update supergraph with the following error: Syntax Error: Unexpected Name "Syntax".',
     );
     expect(gateway.schema).toBeTruthy();
   });
@@ -302,8 +292,6 @@ describe('Supergraph SDL update failures', () => {
       logger,
       uplinkEndpoints: [mockCloudConfigUrl1],
     });
-    // for testing purposes, a short pollInterval is ideal so we'll override here
-    gateway['pollIntervalInMs'] = 100;
 
     await expect(
       gateway.load(mockApolloConfig),
@@ -312,10 +300,6 @@ describe('Supergraph SDL update failures', () => {
     );
 
     expect(gateway['state'].phase).toEqual('failed to load');
-
-    // Set to `null` so we don't try to call `stop` on it in the `afterEach`,
-    // which triggers a different error that we're not testing for here.
-    gateway = null;
   });
 });
 
@@ -343,8 +327,6 @@ it('Rollsback to a previous schema when triggered', async () => {
     logger,
     uplinkEndpoints: [mockCloudConfigUrl1],
   });
-  // for testing purposes, a short pollInterval is ideal so we'll override here
-  gateway['pollIntervalInMs'] = 100;
 
   gateway.onSchemaChange(onChange);
   await gateway.load(mockApolloConfig);
@@ -406,14 +388,6 @@ describe('Downstream service health checks', () => {
         "The gateway subgraphs health check failed. Updating to the provided \`supergraphSdl\` will likely result in future request failures to subgraphs. The following error occurred during the health check:
         [accounts]: 500: Internal Server Error"
       `);
-
-      await expect(gateway.stop()).rejects.toThrowErrorMatchingInlineSnapshot(
-        `"ApolloGateway.stop does not need to be called before ApolloGateway.load is called successfully"`,
-      );
-
-      // Set to `null` so we don't try to call `stop` on it in the `afterEach`,
-      // which triggers a different error that we're not testing for here.
-      gateway = null;
     });
   });
 
@@ -427,8 +401,6 @@ describe('Downstream service health checks', () => {
         logger,
         uplinkEndpoints: [mockCloudConfigUrl1],
       });
-      // for testing purposes, a short pollInterval is ideal so we'll override here
-      gateway['pollIntervalInMs'] = 100;
 
       await gateway.load(mockApolloConfig);
       await gateway.stop();
@@ -471,14 +443,6 @@ describe('Downstream service health checks', () => {
         "The gateway subgraphs health check failed. Updating to the provided \`supergraphSdl\` will likely result in future request failures to subgraphs. The following error occurred during the health check:
         [accounts]: 500: Internal Server Error"
       `);
-
-      await expect(gateway.stop()).rejects.toThrowErrorMatchingInlineSnapshot(
-        `"ApolloGateway.stop does not need to be called before ApolloGateway.load is called successfully"`,
-      );
-
-      // Set to `null` so we don't try to call `stop` on it in the `afterEach`,
-      // which triggers a different error that we're not testing for here.
-      gateway = null;
     });
 
     // This test has been flaky for a long time, and fails consistently after changes
@@ -509,8 +473,6 @@ describe('Downstream service health checks', () => {
         logger,
         uplinkEndpoints: [mockCloudConfigUrl1],
       });
-      // for testing purposes, a short pollInterval is ideal so we'll override here
-      gateway['pollIntervalInMs'] = 100;
 
       gateway.onSchemaChange(onChange);
       await gateway.load(mockApolloConfig);
@@ -553,8 +515,6 @@ describe('Downstream service health checks', () => {
         logger,
         uplinkEndpoints: [mockCloudConfigUrl1],
       });
-      // for testing purposes, a short pollInterval is ideal so we'll override here
-      gateway['pollIntervalInMs'] = 100;
 
       const updateSpy = jest.fn();
       gateway.onSchemaLoadOrUpdate(() => updateSpy());
@@ -568,7 +528,7 @@ describe('Downstream service health checks', () => {
 
       await errorLoggedPromise;
       expect(logger.error).toHaveBeenCalledWith(
-        `UplinkFetcher failed to update supergraph with the following error: The gateway subgraphs health check failed. Updating to the provided \`supergraphSdl\` will likely result in future request failures to subgraphs. The following error occurred during the health check:\n[accounts]: 500: Internal Server Error`,
+        `UplinkSupergraphManager failed to update supergraph with the following error: The gateway subgraphs health check failed. Updating to the provided \`supergraphSdl\` will likely result in future request failures to subgraphs. The following error occurred during the health check:\n[accounts]: 500: Internal Server Error`,
       );
 
       // At this point, the mock update should have been called but the schema

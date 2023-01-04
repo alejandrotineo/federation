@@ -27,6 +27,36 @@ export class MultiMap<K, V> extends Map<K, V[]> {
     }
     return this;
   }
+
+  addAll(otherMap: MultiMap<K, V>): this {
+    for (const [k, vs] of otherMap.entries()) {
+      for (const v of vs) {
+        this.add(k, v);
+      }
+    }
+    return this;
+  }
+}
+
+export class SetMultiMap<K, V> extends Map<K, Set<V>> {
+  add(key: K, value: V): this {
+    let values = this.get(key);
+    if (!values) {
+      values = new Set<V>();
+      this.set(key, values);
+    }
+    values.add(value);
+    return this;
+  }
+
+  addAll(otherMap: SetMultiMap<K, V>): this {
+    for (const [k, vs] of otherMap.entries()) {
+      for (const v of vs) {
+        this.add(k, v);
+      }
+    }
+    return this;
+  }
 }
 
 /**
@@ -131,6 +161,21 @@ export function arrayEquals<T>(
   for (let i = 0; i < a.length; ++i) {
     const eltEqual = equalFct ? equalFct(a[i], b[i]) : a[i] === b[i];
     if (!eltEqual) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether the first set is a (non-strict) subset of the second set.
+ */
+export function isSubset<T>(superset: Set<T>, maybeSubset: Set<T>): boolean {
+  if (superset === maybeSubset) {
+    return true;
+  }
+  for (const elt of maybeSubset) {
+    if (!superset.has(elt)) {
       return false;
     }
   }
@@ -267,5 +312,115 @@ export function validateStringContainsBoolean(str?: string) : boolean | undefine
       return false;
     default:
       return undefined;
+  }
+}
+
+/**
+ * Joins an array of string, much like `Array.prototype.join`, but with the ability to use a specific different
+ * separator for the first and/or last occurence.
+ *
+ * The goal is to make reading flow slightly better. For instance, if you have a list of subgraphs `s = ["A", "B", "C"]`,
+ * then `"subgraphs " + joinString(s)` will yield "subgraphs A, B and C".
+ */
+export function joinStrings(toJoin: string[], sep: string = ', ', firstSep?: string, lastSep: string = ' and ') {
+  if (toJoin.length == 0) {
+    return '';
+  }
+  const first = toJoin[0];
+  if (toJoin.length == 1) {
+    return first;
+  }
+  const last = toJoin[toJoin.length - 1];
+  if (toJoin.length == 2) {
+    return first + (firstSep ? firstSep : lastSep) + last;
+  }
+  return first + (firstSep ? firstSep : sep) + toJoin.slice(1, toJoin.length - 1) + lastSep + last;
+}
+
+// When displaying a list of something in a human readable form, after what size (in
+// number of characters) we start displaying only a subset of the list.
+const DEFAULT_HUMAN_READABLE_LIST_CUTOFF_LENGTH = 100;
+
+/**
+ * Like `joinStrings`, joins an array of string, but with a few twists, namely:
+ *  - If the resulting list to print is "too long", it only display a subset of the elements and use some elipsis (...). In other
+ *    words, this method is for case where, where the list ot print is too long, it is more useful to avoid flooding the output than
+ *    printing everything.
+ *  - it allows to prefix the whole list, and to use a different prefix for a single element than for > 1 elements.
+ *  - it forces the use of ',' as separator, but allow a different lastSeparator.
+ */
+export function printHumanReadableList(
+  names: string[],
+  {
+    emptyValue,
+    prefix,
+    prefixPlural,
+    lastSeparator,
+    cutoff_output_length,
+  } : {
+    emptyValue?: string,
+    prefix?: string,
+    prefixPlural?: string,
+    lastSeparator?: string,
+    cutoff_output_length?: number,
+  }
+): string {
+  if (names.length === 0) {
+    return emptyValue ?? '';
+  }
+  if (names.length == 1) {
+    return prefix ? prefix + ' ' + names[0] : names[0];
+  }
+  const cutoff = cutoff_output_length ?? DEFAULT_HUMAN_READABLE_LIST_CUTOFF_LENGTH;
+
+  const { lastIdx } = names.reduce(
+    ({ lastIdx, length }, name) => {
+      if (length + name.length > cutoff) {
+        return {
+          lastIdx,
+          length,
+        };
+      }
+      return {
+        lastIdx: lastIdx + 1,
+        length: length + name.length,
+      };
+    },
+    { lastIdx: 0, length: 0}
+  );
+  // In case the name we list have absurdly long names, we cut it off but ensure we at least display one.
+  const toDisplay = names.slice(0, Math.max(1, lastIdx));
+  const actualPrefix = prefixPlural
+    ? prefixPlural + ' '
+    : (prefix ? prefix + ' ' : '');
+  if (toDisplay.length === names.length) {
+    return actualPrefix + joinStrings(toDisplay, ', ', undefined, lastSeparator);
+  } else {
+    return actualPrefix + joinStrings(toDisplay, ', ', undefined, ', ') + ', ...';
+  }
+}
+
+export type Concrete<Type> = {
+  [Property in keyof Type]-?: Type[Property];
+};
+
+// for use with Array.filter
+// Example:
+//   const x = [1,2,undefined];
+//   const y: number[] = x.filter(isDefined);
+export const isDefined = <T>(t: T | undefined): t is T => t === undefined ? false : true;
+
+/**
+ * Removes the first occurrence of the provided element in the provided array, if said array contains said elements.
+ *
+ * @return whether the element was removed.
+ */
+export function removeArrayElement<T>(element: T, array: T[]): boolean {
+  const index = array.indexOf(element);
+  if (index >= 0) {
+    array.splice(index, 1);
+    return true;
+  } else {
+    return false;
   }
 }

@@ -1,8 +1,4 @@
-import {
-  GraphQLExecutionResult,
-  GraphQLRequestContext,
-} from 'apollo-server-types';
-import { Headers } from 'apollo-server-env';
+import { Headers } from 'node-fetch';
 import {
   execute,
   GraphQLError,
@@ -14,8 +10,10 @@ import {
   GraphQLSchema,
   isObjectType,
   isInterfaceType,
+  GraphQLErrorOptions,
+  DocumentNode,
 } from 'graphql';
-import { Trace, google } from 'apollo-reporting-protobuf';
+import { Trace, google } from '@apollo/usage-reporting-protobuf';
 import { GraphQLDataSource, GraphQLDataSourceRequestKind } from './datasources/types';
 import { OperationContext } from './operationContext';
 import {
@@ -26,12 +24,15 @@ import {
   QueryPlanSelectionNode,
   QueryPlanFieldNode,
   getResponseName,
+  FetchDataInputRewrite,
+  FetchDataOutputRewrite,
 } from '@apollo/query-planner';
 import { deepMerge } from './utilities/deepMerge';
 import { isNotNullOrUndefined } from './utilities/array';
 import { SpanStatusCode } from "@opentelemetry/api";
 import { OpenTelemetrySpanNames, tracer } from "./utilities/opentelemetry";
-import { defaultRootName } from '@apollo/federation-internals';
+import { assert, defaultRootName, errorCodeDef, ERRORS, isDefined } from '@apollo/federation-internals';
+import { GatewayGraphQLRequestContext, GatewayExecutionResult } from '@apollo/server-gateway-interface';
 
 export type ServiceMap = {
   [serviceName: string]: GraphQLDataSource;
@@ -39,20 +40,22 @@ export type ServiceMap = {
 
 type ResultMap = Record<string, any>;
 
-interface ExecutionContext<TContext> {
+interface ExecutionContext {
   queryPlan: QueryPlan;
   operationContext: OperationContext;
   serviceMap: ServiceMap;
-  requestContext: GraphQLRequestContext<TContext>;
+  requestContext: GatewayGraphQLRequestContext;
+  supergraphSchema: GraphQLSchema;
   errors: GraphQLError[];
 }
 
-export async function executeQueryPlan<TContext>(
+export async function executeQueryPlan(
   queryPlan: QueryPlan,
   serviceMap: ServiceMap,
-  requestContext: GraphQLRequestContext<TContext>,
+  requestContext: GatewayGraphQLRequestContext,
   operationContext: OperationContext,
-): Promise<GraphQLExecutionResult> {
+  supergraphSchema: GraphQLSchema,
+): Promise<GatewayExecutionResult> {
 
   const logger = requestContext.logger || console;
 
@@ -60,11 +63,12 @@ export async function executeQueryPlan<TContext>(
     try {
       const errors: GraphQLError[] = [];
 
-      const context: ExecutionContext<TContext> = {
+      const context: ExecutionContext = {
         queryPlan,
         operationContext,
         serviceMap,
         requestContext,
+        supergraphSchema,
         errors,
       };
 
@@ -118,11 +122,7 @@ export async function executeQueryPlan<TContext>(
               errors: [
                 new GraphQLError(
                   error.message,
-                  undefined,
-                  undefined,
-                  undefined,
-                  undefined,
-                  error as Error,
+                  { originalError: error },
                 )
               ]
             };
@@ -169,8 +169,8 @@ export async function executeQueryPlan<TContext>(
 // we're going to ignore it, because it makes the code much simpler and more
 // typesafe. However, it doesn't actually ask for traces from the backend
 // service unless we are capturing traces for Studio.
-async function executeNode<TContext>(
-  context: ExecutionContext<TContext>,
+async function executeNode(
+  context: ExecutionContext,
   node: PlanNode,
   results: ResultMap | ResultMap[],
   path: ResponsePath,
@@ -250,11 +250,17 @@ async function executeNode<TContext>(
       }
       return new Trace.QueryPlanNode({ fetch: traceNode });
     }
+    case 'Defer': {
+      assert(false, `@defer support is not available in the gateway`);
+    }
+    case 'Condition': {
+      assert(false, `Condition nodes are not available in the gateway`);
+    }
   }
 }
 
-async function executeFetch<TContext>(
-  context: ExecutionContext<TContext>,
+async function executeFetch(
+  context: ExecutionContext,
   fetch: FetchNode,
   results: ResultMap | (ResultMap | null | undefined)[],
   _path: ResponsePath,
@@ -298,10 +304,12 @@ async function executeFetch<TContext>(
             context,
             fetch.operation,
             variables,
+            fetch.operationName,
+            fetch.operationDocumentNode
         );
 
         for (const entity of entities) {
-          deepMerge(entity, dataReceivedFromService);
+          deepMerge(entity, withFetchRewrites(dataReceivedFromService, fetch.outputRewrites));
         }
       } else {
         const requires = fetch.requires;
@@ -311,9 +319,13 @@ async function executeFetch<TContext>(
 
         entities.forEach((entity, index) => {
           const representation = executeSelectionSet(
-            context.operationContext,
+            // Note that `requires` may include references to inacessible elements, so we should "execute" it using the supergrah
+            // schema, _not_ the API schema (the one in `context.operationContext.schema`). And this is not a security risk since
+            // what we're extracting here is what is sent to subgraphs, and subgraphs knows `@inacessible` elements.
+            context.supergraphSchema,
             entity,
             requires,
+            fetch.inputRewrites,
           );
           if (representation && representation[TypeNameMetaFieldDef.name]) {
             representations.push(representation);
@@ -333,6 +345,8 @@ async function executeFetch<TContext>(
             context,
             fetch.operation,
             {...variables, representations},
+            fetch.operationName,
+            fetch.operationDocumentNode
         );
 
         if (!dataReceivedFromService) {
@@ -357,7 +371,7 @@ async function executeFetch<TContext>(
         }
 
         for (let i = 0; i < entities.length; i++) {
-          deepMerge(entities[representationToEntity[i]], receivedEntities[i]);
+          deepMerge(entities[representationToEntity[i]], withFetchRewrites(receivedEntities[i], filterEntityRewrites(representations[i], fetch.outputRewrites)));
         }
       }
     }
@@ -371,12 +385,18 @@ async function executeFetch<TContext>(
     }
   });
   async function sendOperation(
-    context: ExecutionContext<TContext>,
+    context: ExecutionContext,
     source: string,
     variables: Record<string, any>,
+    operationName: string | undefined,
+    operationDocumentNode?: DocumentNode
   ): Promise<ResultMap | void | null> {
     // We declare this as 'any' because it is missing url and method, which
     // GraphQLRequest.http is supposed to have if it exists.
+    // (This is admittedly kinda weird, since we currently do pass url and
+    // method to `process` from the SDL fetching call site, but presumably
+    // existing implementation of the interface don't try to look for these
+    // fields. RemoteGraphQLDataSource just overwrites them.)
     let http: any;
 
     // If we're capturing a trace for Studio, then save the operation text to
@@ -402,10 +422,12 @@ async function executeFetch<TContext>(
       request: {
         query: source,
         variables,
+        operationName,
         http,
       },
       incomingRequestContext: context.requestContext,
       context: context.requestContext.context,
+      document: operationDocumentNode
     });
 
     if (response.errors) {
@@ -465,15 +487,94 @@ async function executeFetch<TContext>(
   }
 }
 
+function applyOrMapRecursive(value: any | any[], fct: (v: any) => any | undefined): any | any[] | undefined {
+  if (Array.isArray(value)) {
+    const res = value.map((elt) => applyOrMapRecursive(elt, fct)).filter(isDefined);
+    return res.length === 0 ? undefined : res;
+  }
+  return fct(value);
+}
+
+function withFetchRewrites(fetchResult: ResultMap | null | void, rewrites: FetchDataOutputRewrite[] | undefined): ResultMap | null | void {
+  if (!rewrites || !fetchResult) {
+    return fetchResult;
+  }
+
+  for (const rewrite of rewrites) {
+    let obj: any = fetchResult;
+    let i = 0;
+    while (obj && i < rewrite.path.length - 1) {
+      const p = rewrite.path[i++];
+      if (p.startsWith('... on ')) {
+        const typename = p.slice('... on '.length);
+        // Filter only objects that match the condition.
+        obj = applyOrMapRecursive(obj, (elt) => elt[TypeNameMetaFieldDef.name] === typename ? elt : undefined);
+      } else {
+        obj = applyOrMapRecursive(obj, (elt) => elt[p]);
+      }
+    }
+    if (obj) {
+      applyOrMapRecursive(obj, (elt) => {
+        if (typeof elt === 'object') {
+          // We need to move the value at path[i] to `renameKeyTo`.
+          const removedKey = rewrite.path[i];
+          elt[rewrite.renameKeyTo] = elt[removedKey];
+          elt[removedKey] = undefined;
+        }
+      });
+    }
+  }
+  return fetchResult;
+}
+
+function filterEntityRewrites(entity: Record<string, any>, rewrites: FetchDataOutputRewrite[] | undefined): FetchDataOutputRewrite[] | undefined {
+  if (!rewrites) {
+    return undefined;
+  }
+
+  const typename = entity[TypeNameMetaFieldDef.name] as string;
+  const typenameAsFragment = `... on ${typename}`;
+  return rewrites.map((r) => r.path[0] === typenameAsFragment ? { ...r, path: r.path.slice(1) } : undefined).filter(isDefined)
+}
+
+function updateRewrites(rewrites: FetchDataInputRewrite[] | undefined, pathElement: string): {
+  updated: FetchDataInputRewrite[],
+  completeRewrite?: any,
+} | undefined {
+  if (!rewrites) {
+    return undefined;
+  }
+
+  let completeRewrite: any = undefined;
+  const updated = rewrites
+    .map((r) => {
+      let u: FetchDataInputRewrite | undefined = undefined;
+      if (r.path[0] === pathElement) {
+        const updatedPath = r.path.slice(1);
+        if (updatedPath.length === 0) {
+          completeRewrite = r.setValueTo;
+        } else {
+          u = { ...r, path: updatedPath };
+        }
+      }
+      return u;
+    })
+    .filter(isDefined);
+  return updated.length === 0 && completeRewrite === undefined
+    ? undefined
+    : { updated, completeRewrite };
+}
+
 /**
  *
  * @param source Result of GraphQL execution.
  * @param selectionSet
  */
 function executeSelectionSet(
-  operationContext: OperationContext,
+  schema: GraphQLSchema,
   source: Record<string, any> | null,
   selections: QueryPlanSelectionNode[],
+  activeRewrites?: FetchDataInputRewrite[],
 ): Record<string, any> | null {
 
   // If the underlying service has returned null for the parent (source)
@@ -503,17 +604,25 @@ function executeSelectionSet(
           // here.
           return null;
         }
+
+        const updatedRewrites = updateRewrites(activeRewrites, responseName);
+        if (updatedRewrites?.completeRewrite !== undefined) {
+          result[responseName] = updatedRewrites.completeRewrite;
+          continue;
+        }
+
         if (Array.isArray(source[responseName])) {
           result[responseName] = source[responseName].map((value: any) =>
             selections
-              ? executeSelectionSet(operationContext, value, selections)
+              ? executeSelectionSet(schema, value, selections, updatedRewrites?.updated)
               : value,
           );
         } else if (selections) {
           result[responseName] = executeSelectionSet(
-            operationContext,
+            schema,
             source[responseName],
             selections,
+            updatedRewrites?.updated,
           );
         } else {
           result[responseName] = source[responseName];
@@ -525,10 +634,11 @@ function executeSelectionSet(
         const typename = source && source['__typename'];
         if (!typename) continue;
 
-        if (doesTypeConditionMatch(operationContext.schema, selection.typeCondition, typename)) {
+        if (doesTypeConditionMatch(schema, selection.typeCondition, typename)) {
+          const updatedRewrites = activeRewrites ? updateRewrites(activeRewrites, `... on ${selection.typeCondition}`) : undefined;
           deepMerge(
             result,
-            executeSelectionSet(operationContext, source, selection.selections),
+            executeSelectionSet(schema, source, selection.selections, updatedRewrites?.updated),
           );
         }
         break;
@@ -585,22 +695,25 @@ function downstreamServiceError(
   if (!message) {
     message = `Error while fetching subquery from service "${serviceName}"`;
   }
-  extensions = {
-    code: 'DOWNSTREAM_SERVICE_ERROR',
-    // XXX The presence of a serviceName in extensions is used to
-    // determine if this error should be captured for metrics reporting.
-    serviceName,
-    ...extensions,
+
+  const errorOptions: GraphQLErrorOptions = {
+    originalError: originalError as Error,
+    extensions: {
+      ...extensions,
+      // XXX The presence of a serviceName in extensions is used to
+      // determine if this error should be captured for metrics reporting.
+      serviceName,
+    }
   };
-  return new GraphQLError(
-    message,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    originalError as Error,
-    extensions,
-  );
+
+  const codeDef = errorCodeDef(originalError);
+  // It's possible the orignal has a code, but not one we know about (one generated by the underlying `GraphQLDataSource`,
+  // which we don't control). In that case, we want to use that code (and have thus no `ErrorCodeDefinition` usable).
+  if (!codeDef && extensions?.code) {
+    return new GraphQLError(message, errorOptions);
+  }
+  // Otherwise, we either use the code we found and know, or default to a general downstream error code.
+  return (codeDef ?? ERRORS.DOWNSTREAM_SERVICE_ERROR).err(message, errorOptions);
 }
 
 export const defaultFieldResolverWithAliasSupport: GraphQLFieldResolver<

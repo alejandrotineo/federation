@@ -1,0 +1,69 @@
+{
+  "title": "Federation",
+  "version": "v2",
+  "algoliaFilters": [
+    "docset:federation",
+    [
+      "docset:apollo-server",
+      "docset:rover",
+      "docset:router",
+      "docset:graphos"
+    ]
+  ],
+  "sidebar": {
+    "Introduction": "/",
+    "Federation 2 Updates": {
+      "☀️ New in Federation 2": "/federation-2/new-in-federation-2",
+      "🚚 Moving from Federation 1": "/federation-2/moving-to-federation-2",
+      "⬅️ Backward compatibility": "/federation-2/backward-compatibility",
+      "🚀 Demo app": "https://github.com/apollographql/supergraph-demo-fed2",
+      "🗺 Roadmap": "https://github.com/apollographql/federation/blob/main/ROADMAP.md"
+    },
+    "Quickstart": {
+      "1️⃣ Project setup": "/quickstart/setup",
+      "2️⃣ Composition in Apollo Studio": "/quickstart/studio-composition",
+      "3️⃣ Local composition": "/quickstart/local-composition",
+      "4️⃣ Working with subgraphs": "/quickstart/local-subgraphs"
+    },
+    "Building Your Supergraph": {
+      "Subgraphs": "/building-supergraphs/subgraphs-overview",
+      "Supported subgraph libraries": "/building-supergraphs/supported-subgraphs",
+      "Router/gateway": "/building-supergraphs/router",
+      "Apollo Server subgraphs": "https://apollographql.com/docs/apollo-server/using-federation/apollo-subgraph-setup"
+    },
+    "Federated Schemas": {
+      "Overview": "/federated-types/overview",
+      "Composition": "/federated-types/composition",
+      "Federated directives": "/federated-types/federated-directives",
+      "Sharing types (value types)": "/federated-types/sharing-types",
+      "Entities (basics)": "/entities",
+      "Entities (advanced)": "/entities-advanced",
+      "Migrating from schema stitching": "/migrating-from-stitching"
+    },
+    "Managed Federation": {
+      "Overview": "/managed-federation/overview",
+      "Setup": "/managed-federation/setup",
+      "Uplink": "/managed-federation/uplink",
+      "Federated schema checks": "/managed-federation/federated-schema-checks",
+      "Deployment best practices": "/managed-federation/deployment",
+      "Opt-in error reporting": "/managed-federation/error-reporting",
+      "Studio features": "https://www.apollographql.com/docs/studio/federated-graphs/"
+    },
+    "Performance": {
+      "Caching": "/performance/caching",
+      "Monitoring": "/performance/monitoring",
+      "Query plans": "/query-plans"
+    },
+    "Debugging & Metrics": {
+      "Error codes": "/errors",
+      "Composition hints": "/hints",
+      "Federated trace data": "/metrics",
+      "OpenTelemetry": "/opentelemetry"
+    },
+    "API Reference": {
+      "@apollo/subgraph": "https://apollographql.com/docs/apollo-server/using-federation/api/apollo-subgraph",
+      "@apollo/gateway": "https://apollographql.com/docs/apollo-server/using-federation/api/apollo-gateway",
+      "Subgraph specification": "/subgraph-spec"
+    }
+  }
+}

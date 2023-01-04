@@ -21,6 +21,7 @@ import {
   GraphQLEnumValueConfig,
   ConstDirectiveNode,
   ASTNode,
+  StringValueNode,
 } from 'graphql';
 
 import { GraphQLResolverMap, GraphQLSchemaModule } from './resolverMap';
@@ -35,6 +36,11 @@ import { SDLValidationRule } from "graphql/validation/ValidationContext";
 
 import { specifiedSDLRules } from 'graphql/validation/specifiedRules';
 import { GraphQLSchemaValidationError } from './error';
+import {
+  ApolloGraphQLInterfaceTypeExtensions,
+  ApolloGraphQLObjectTypeExtensions,
+  ApolloGraphQLUnionTypeExtensions
+} from "../schemaExtensions";
 
 function isNotNullOrUndefined<T>(
   value: T | null | undefined,
@@ -106,9 +112,21 @@ export function addResolversToSchema(
     const type = schema.getType(typeName);
 
     if (isAbstractType(type)) {
+      const existingExtensions: ApolloGraphQLUnionTypeExtensions | ApolloGraphQLInterfaceTypeExtensions = type.extensions;
       for (const [fieldName, fieldConfig] of Object.entries(fieldConfigs)) {
-        if (fieldName.startsWith("__")) {
-          (type as any)[fieldName.substring(2)] = fieldConfig;
+        if (fieldName === '__resolveReference') {
+          type.extensions = {
+            ...existingExtensions,
+            apollo: {
+              ...existingExtensions.apollo,
+              subgraph: {
+                ...existingExtensions.apollo?.subgraph,
+                resolveReference: fieldConfig,
+              },
+            },
+          };
+        } else if (fieldName === '__resolveType') {
+          type.resolveType = fieldConfig;
         }
       }
     }
@@ -151,10 +169,22 @@ export function addResolversToSchema(
     if (!isObjectType(type)) continue;
 
     const fieldMap = type.getFields();
-
+    const existingExtensions: ApolloGraphQLObjectTypeExtensions = type.extensions;
     for (const [fieldName, fieldConfig] of Object.entries(fieldConfigs)) {
-      if (fieldName.startsWith("__")) {
-        (type as any)[fieldName.substring(2)] = fieldConfig;
+      if (fieldName === '__resolveReference') {
+        type.extensions = {
+          ...existingExtensions,
+          apollo: {
+            ...existingExtensions.apollo,
+            subgraph: {
+              ...existingExtensions.apollo?.subgraph,
+              resolveReference: fieldConfig,
+            },
+          },
+        };
+        continue;
+      } else if (fieldName === '__isTypeOf') {
+        type.isTypeOf = fieldConfig;
         continue;
       }
 
@@ -196,6 +226,7 @@ export function buildSchemaFromSDL(
   const schemaDefinitions: SchemaDefinitionNode[] = [];
   const schemaExtensions: SchemaExtensionNode[] = [];
   const schemaDirectives: ConstDirectiveNode[] = [];
+  let description: StringValueNode | undefined;
 
   for (const definition of documentAST.definitions) {
     if (isTypeDefinitionNode(definition)) {
@@ -221,8 +252,12 @@ export function buildSchemaFromSDL(
       schemaDirectives.push(
         ...(definition.directives ? definition.directives : [])
       );
+      description = definition.description;
     } else if (definition.kind === Kind.SCHEMA_EXTENSION) {
       schemaExtensions.push(definition);
+      schemaDirectives.push(
+        ...(definition.directives ? definition.directives : [])
+      );
     }
   }
 
@@ -276,14 +311,13 @@ export function buildSchemaFromSDL(
 
   let operationTypeMap: { [operation in OperationTypeNode]?: string };
 
-  if (schemaDefinitions.length > 0 || schemaExtensions.length > 0) {
+  const operationTypes = [...schemaDefinitions, ...schemaExtensions]
+    .map(node => node.operationTypes)
+    .filter(isNotNullOrUndefined)
+    .flat();
+
+  if (operationTypes.length > 0) {
     operationTypeMap = {};
-
-    const operationTypes = [...schemaDefinitions, ...schemaExtensions]
-        .map(node => node.operationTypes)
-        .filter(isNotNullOrUndefined)
-        .flat();
-
     for (const { operation, type } of operationTypes) {
       operationTypeMap[operation] = type.name.value;
     }
@@ -302,8 +336,10 @@ export function buildSchemaFromSDL(
         ? (schema.getType(typeName) as GraphQLObjectType<any, any>)
         : undefined
     ),
+    description: description?.value,
     astNode: {
       kind: Kind.SCHEMA_DEFINITION,
+      description,
       directives: schemaDirectives,
       operationTypes: [] // satisfies typescript, will be ignored
     }

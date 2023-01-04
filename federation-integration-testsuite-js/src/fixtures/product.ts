@@ -1,5 +1,6 @@
-import gql from 'graphql-tag';
 import { GraphQLResolverMap } from '../resolverMap';
+import { fed2gql as gql } from '../utils/fed2gql';
+import { maybeCacheControlFromInfo } from '@apollo/cache-control-types';
 
 export const name = 'product';
 export const url = `https://${name}.api.com.invalid`;
@@ -18,7 +19,7 @@ export const typeDefs = gql`
     inheritMaxAge: Boolean
   ) on FIELD_DEFINITION | OBJECT | INTERFACE | UNION
 
-  extend type Query {
+  type Query {
     product(upc: String!): Product
     vehicle(id: String!): Vehicle
     topProducts(first: Int = 5): [Product] @cacheControl(maxAge: 40)
@@ -67,8 +68,8 @@ export const typeDefs = gql`
     details: ProductDetailsFurniture
   }
 
-  extend type Book implements Product @key(fields: "isbn") {
-    isbn: String! @external
+  type Book implements Product @key(fields: "isbn") {
+    isbn: String!
     title: String @external
     year: Int @external
     upc: String!
@@ -98,20 +99,20 @@ export const typeDefs = gql`
 
   union Thing = Car | Ikea
 
-  extend type User @key(fields: "id") {
-    id: ID! @external
+  type User @key(fields: "id") {
+    id: ID!
     vehicle: Vehicle
     thing: Thing
   }
 
   # Value type
-  type KeyValue {
+  type KeyValue @shareable {
     key: String!
     value: String!
   }
 
   # Value type
-  type Error {
+  type Error @shareable {
     code: Int
     message: String
   }
@@ -198,7 +199,7 @@ export const resolvers: GraphQLResolverMap<any> = {
     __resolveReference(object, _context, info) {
       // For testing dynamic cache control; use `?.` because we don't always run
       // this fixture in a real ApolloServer.
-      info.cacheControl?.cacheHint?.restrict({ maxAge: 30 });
+      maybeCacheControlFromInfo(info)?.cacheHint.restrict({ maxAge: 30 });
       if (object.isbn) {
         const fetchedObject = products.find(
           product => product.isbn === object.isbn,

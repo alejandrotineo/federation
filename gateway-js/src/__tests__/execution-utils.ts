@@ -1,9 +1,9 @@
 import {
-  GraphQLSchemaValidationError,
   GraphQLSchemaModule,
   GraphQLResolverMap,
-} from '../schema-helper';
-import { GraphQLRequest, GraphQLExecutionResult, Logger } from 'apollo-server-types';
+  GraphQLSchemaValidationError,
+} from '@apollo/subgraph/src/schema-helper';
+import type { Logger } from '@apollo/utils.logger';
 import { buildSubgraphSchema } from '@apollo/subgraph';
 import {
   executeQueryPlan,
@@ -11,13 +11,14 @@ import {
 } from '@apollo/gateway';
 import { QueryPlan, QueryPlanner } from '@apollo/query-planner';
 import { LocalGraphQLDataSource } from '../datasources/LocalGraphQLDataSource';
-import { mergeDeep } from 'apollo-utilities';
+import { mergeDeep } from '@apollo/client/utilities';
 
 import { queryPlanSerializer, astSerializer } from 'apollo-federation-integration-testsuite';
 import gql from 'graphql-tag';
 import { fixtures } from 'apollo-federation-integration-testsuite';
 import { composeServices } from '@apollo/composition';
 import { buildSchema, operationFromDocument, ServiceDefinition } from '@apollo/federation-internals';
+import { GatewayExecutionResult, GatewayGraphQLRequest } from '@apollo/server-gateway-interface';
 
 const prettyFormat = require('pretty-format');
 
@@ -35,10 +36,10 @@ export function overrideResolversInService(
 }
 
 export async function execute(
-  request: GraphQLRequest,
+  request: GatewayGraphQLRequest,
   services: ServiceDefinitionModule[] = fixtures,
   logger: Logger = console,
-): Promise<GraphQLExecutionResult & { queryPlan: QueryPlan }> {
+): Promise<GatewayExecutionResult & { queryPlan: QueryPlan }> {
   const serviceMap = Object.fromEntries(
     services.map(({ name, typeDefs, resolvers }) => {
       return [
@@ -52,12 +53,13 @@ export async function execute(
 
   const { schema, queryPlanner } = getFederatedTestingSchema(services);
 
+  const apiSchema = schema.toAPISchema();
   const operationDocument = gql`${request.query}`;
-  const operation = operationFromDocument(schema, operationDocument);
+  const operation = operationFromDocument(apiSchema, operationDocument);
   const queryPlan = queryPlanner.buildQueryPlan(operation);
 
   const operationContext = buildOperationContext({
-    schema: schema.toAPISchema().toGraphQLJSSchema(),
+    schema: apiSchema.toGraphQLJSSchema(),
     operationDocument,
   });
 
@@ -73,6 +75,7 @@ export async function execute(
       logger
     },
     operationContext,
+    schema.toGraphQLJSSchema(),
   );
 
   return { ...result, queryPlan };

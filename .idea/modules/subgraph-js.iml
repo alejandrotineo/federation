@@ -1,11 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<module type="WEB_MODULE" version="4">
-  <component name="NewModuleRootManager" inherit-compiler-output="true">
-    <exclude-output />
-    <content url="file://$MODULE_DIR$/../../subgraph-js">
-      <sourceFolder url="file://$MODULE_DIR$/../../subgraph-js/src/__tests__" isTestSource="true" />
-      <excludeFolder url="file://$MODULE_DIR$/../../subgraph-js/dist" />
-    </content>
-    <orderEntry type="sourceFolder" forTests="false" />
+<module version="4">
+  <component name="SonarLintModuleSettings">
+    <option name="uniqueId" value="7e929020-b271-422d-8abe-49c06ced9b95" />
   </component>
 </module>

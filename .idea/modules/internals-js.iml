@@ -1,11 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<module type="WEB_MODULE" version="4">
-  <component name="NewModuleRootManager" inherit-compiler-output="true">
-    <exclude-output />
-    <content url="file://$MODULE_DIR$/../../internals-js">
-      <sourceFolder url="file://$MODULE_DIR$/../../internals-js/src/__tests__" isTestSource="true" />
-      <excludeFolder url="file://$MODULE_DIR$/../../internals-js/dist" />
-    </content>
-    <orderEntry type="sourceFolder" forTests="false" />
+<module version="4">
+  <component name="SonarLintModuleSettings">
+    <option name="uniqueId" value="9cc03ae3-11ab-431d-9e92-b095392cf00f" />
   </component>
 </module>

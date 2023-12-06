@@ -1,11 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<module type="WEB_MODULE" version="4">
-  <component name="NewModuleRootManager" inherit-compiler-output="true">
-    <exclude-output />
-    <content url="file://$MODULE_DIR$/../../query-graphs-js">
-      <sourceFolder url="file://$MODULE_DIR$/../../query-graphs-js/src/__tests__" isTestSource="true" />
-      <excludeFolder url="file://$MODULE_DIR$/../../query-graphs-js/dist" />
-    </content>
-    <orderEntry type="sourceFolder" forTests="false" />
+<module version="4">
+  <component name="SonarLintModuleSettings">
+    <option name="uniqueId" value="916658cb-486c-49e2-a4cc-1b1c3779f0f1" />
   </component>
 </module>
